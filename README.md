@@ -7,7 +7,7 @@
 [![Language](https://img.shields.io/badge/language-R-blue)](https://www.r-project.org/)
 [![Report](https://img.shields.io/badge/report-R%20Markdown-1f6feb)](group_assignment_hr_morale.html)
 [![Analysis](https://img.shields.io/badge/project-statistical%20analysis-6f42c1)](#methodology)
-[![License](https://img.shields.io/badge/license-not%20specified-lightgrey)](#license)
+
 
 </div>
 
