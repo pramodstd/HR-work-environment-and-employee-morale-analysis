@@ -1,0 +1,696 @@
+---
+title: "Employees Who Experience Positive Work Environments Show Higher Morale (Simulated Dataset Experiment)"
+author: "Group TPSM Project Division"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    number_sections: true
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    latex_engine: xelatex
+subtitle: "IT3011 - Theory and Practices in Statistical Modeling | Group Assignment | Simulated Dataset"
+---
+
+```{r setup, include=FALSE}
+# Ensure TinyTeX binaries are visible during PDF rendering.
+tinytex_bin <- path.expand("~/Library/TinyTeX/bin/universal-darwin")
+if (dir.exists(tinytex_bin) && !grepl(tinytex_bin, Sys.getenv("PATH"), fixed = TRUE)) {
+  Sys.setenv(PATH = paste(tinytex_bin, Sys.getenv("PATH"), sep = .Platform$path.sep))
+}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 6,
+  fig.align = "center"
+)
+```
+
+# Introduction
+
+## Analytical Statement
+
+> **"Positive work environment improves employee morale."**
+
+This report investigates whether workplace support factors are associated with higher employee morale. We evaluate support through environment satisfaction, relationship quality, work-life balance, overtime burden, and travel pressure. Morale is measured using job satisfaction, job involvement, performance rating, and retention tendency.
+
+## Dataset Description
+
+We use a **simulated HR Employee Attrition** dataset in the project directory:
+
+-   **File:** `HR-Employee-Attrition-New-Simulated.csv`
+-   **Rows:** `r nrow(read.csv("HR-Employee-Attrition-New-Simulated.csv", fileEncoding = "UTF-8-BOM"))`
+-   **Source type:** Simulated experimental data (derived from a copy of the original HR dataset)
+
+## Variable Structure
+
+| Role | Variables |
+|:-----------------------------------|:-----------------------------------|
+| **Independent (Work Environment)** | EnvironmentSatisfaction, RelationshipSatisfaction, WorkLifeBalance, OverTime, BusinessTravel |
+| **Dependent (Morale)** | JobSatisfaction, JobInvolvement, PerformanceRating, Attrition (inverse) |
+| **Control Variables** | Age, MonthlyIncome, JobLevel, YearsAtCompany, Gender, Department |
+
+## Methodology
+
+The analysis follows three phases:
+
+1.  **Descriptive Analytics**: summaries, distributions, and visual exploration.
+2.  **Inferential Analytics**: ANOVA, t-tests, proportion tests, variance tests, and correlation tests.
+3.  **Predictive Analytics**: multiple linear regression and Naive Bayes classification.
+
+------------------------------------------------------------------------
+
+# Data Loading and Preparation
+
+## Package Setup
+
+```{r packages}
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret", dependencies = TRUE, repos = "https://cran.r-project.org")
+}
+
+required_packages <- c("tidyverse", "MASS", "car", "e1071", "corrplot",
+                       "nortest", "caret", "fitdistrplus")
+new_packages <- required_packages[!(required_packages %in% installed.packages()[, "Package"])]
+if (length(new_packages)) {
+  install.packages(new_packages, dependencies = TRUE, repos = "https://cran.r-project.org")
+}
+
+invisible(lapply(required_packages, library, character.only = TRUE))
+set.seed(42)
+```
+
+## Loading the Dataset
+
+```{r load-data}
+data <- read.csv("HR-Employee-Attrition-New-Simulated.csv", fileEncoding = "UTF-8-BOM", stringsAsFactors = FALSE)
+```
+
+The dataset contains **`r nrow(data)` rows** and **`r ncol(data)` columns**.
+
+```{r structure}
+str(data)
+```
+
+## Missing Values Check
+
+```{r missing-values}
+missing_counts <- colSums(is.na(data))
+knitr::kable(data.frame(Variable = names(missing_counts), Missing = missing_counts),
+             row.names = FALSE, caption = "Missing Value Counts")
+```
+
+**Conclusion:** `r if(sum(missing_counts) == 0) "The dataset has no missing values. No imputation is required." else paste("There are", sum(missing_counts), "missing values that should be handled before modeling.")`
+
+## Cleaning and Encoding
+
+```{r cleaning-encoding}
+# Remove identifiers and constant columns that do not carry predictive signal.
+drop_cols <- intersect(c("EmployeeCount", "EmployeeNumber", "Over18", "StandardHours"), names(data))
+data <- data[, setdiff(names(data), drop_cols)]
+
+# Convert string columns to factors.
+char_cols <- names(data)[sapply(data, is.character)]
+data[char_cols] <- lapply(data[char_cols], factor)
+
+# Binary encodings for modeling.
+data$OverTime_Num <- ifelse(data$OverTime == "Yes", 1, 0)
+data$Attrition_Num <- ifelse(data$Attrition == "Yes", 1, 0)
+data$Retention_Num <- 1 - data$Attrition_Num
+
+# Ordered labels for plotting and ANOVA readability.
+sat_levels <- c("Low", "Medium", "High", "Very High")
+data$Environment_F <- factor(data$EnvironmentSatisfaction, levels = 1:4, labels = sat_levels, ordered = TRUE)
+data$Relationship_F <- factor(data$RelationshipSatisfaction, levels = 1:4, labels = sat_levels, ordered = TRUE)
+data$WorkLife_F <- factor(data$WorkLifeBalance, levels = 1:4, labels = sat_levels, ordered = TRUE)
+```
+
+## Derived Variables and Composite Indexes
+
+```{r derived-vars}
+# Standardize helper
+z <- function(x) as.numeric(scale(x))
+
+# Work environment support index
+support_matrix <- cbind(
+  z(data$EnvironmentSatisfaction),
+  z(data$RelationshipSatisfaction),
+  z(data$WorkLifeBalance),
+  z(1 - data$OverTime_Num),
+  z(ifelse(data$BusinessTravel == "Non-Travel", 2,
+           ifelse(data$BusinessTravel == "Travel_Rarely", 1, 0)))
+)
+data$Support_Index <- rowMeans(support_matrix)
+
+# Morale index
+morale_matrix <- cbind(
+  z(data$JobSatisfaction),
+  z(data$JobInvolvement),
+  z(data$PerformanceRating),
+  z(data$Retention_Num)
+)
+data$Morale_Index <- rowMeans(morale_matrix)
+
+# Binary and category targets for classification
+data$High_Morale <- ifelse(data$Morale_Index > median(data$Morale_Index), 1, 0)
+tertile_breaks <- quantile(data$Morale_Index, probs = c(0, 1/3, 2/3, 1))
+data$Morale_Category <- cut(data$Morale_Index, breaks = tertile_breaks,
+                            labels = c("Low", "Medium", "High"),
+                            include.lowest = TRUE)
+```
+
+```{r index-summary}
+summary(data$Support_Index)
+summary(data$Morale_Index)
+```
+
+------------------------------------------------------------------------
+
+# Descriptive Analytics
+
+## Numeric Variable Summaries
+
+```{r numeric-summary}
+numeric_vars <- c("Support_Index", "Morale_Index", "Age", "MonthlyIncome", "YearsAtCompany",
+                  "EnvironmentSatisfaction", "RelationshipSatisfaction", "WorkLifeBalance",
+                  "JobSatisfaction", "JobInvolvement")
+
+stats_df <- data.frame(
+  Variable = numeric_vars,
+  Mean   = sapply(data[numeric_vars], mean),
+  Median = sapply(data[numeric_vars], median),
+  SD     = sapply(data[numeric_vars], sd),
+  Min    = sapply(data[numeric_vars], min),
+  Max    = sapply(data[numeric_vars], max),
+  IQR    = sapply(data[numeric_vars], IQR)
+)
+knitr::kable(stats_df, digits = 3, row.names = FALSE,
+             caption = "Summary Statistics for Numeric Variables")
+```
+
+## Categorical Variable Frequencies
+
+```{r categorical-summary}
+cat_vars <- c("Environment_F", "Relationship_F", "WorkLife_F", "OverTime",
+              "BusinessTravel", "Department", "Gender")
+
+for (var in cat_vars) {
+  tbl <- table(data[[var]])
+  pct <- prop.table(tbl) * 100
+  freq_df <- data.frame(Level = names(tbl), Count = as.numeric(tbl),
+                        Percent = round(as.numeric(pct), 1))
+  cat(sprintf("\n**%s:**\n\n", var))
+  print(knitr::kable(freq_df, row.names = FALSE))
+  cat("\n")
+}
+```
+
+## Mean Morale by Support Levels
+
+```{r morale-by-support}
+support_vars <- c("Environment_F", "Relationship_F", "WorkLife_F", "OverTime", "BusinessTravel")
+
+for (var in support_vars) {
+  group_stats <- data %>%
+    group_by(.data[[var]]) %>%
+    summarise(Mean = round(mean(Morale_Index), 4),
+              SD   = round(sd(Morale_Index), 4),
+              N    = n(), .groups = "drop")
+  cat(sprintf("\n**%s:**\n\n", var))
+  print(knitr::kable(group_stats, row.names = FALSE))
+  cat("\n")
+}
+```
+
+## Visual Exploration
+
+### Histograms of Key Variables
+
+```{r histograms, fig.height=5}
+hist_vars <- c("Support_Index", "Morale_Index", "MonthlyIncome", "Age", "YearsAtCompany")
+
+for (var in hist_vars) {
+  p <- ggplot(data, aes(x = .data[[var]])) +
+    geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8) +
+    labs(title = paste("Distribution of", var), x = var, y = "Count") +
+    theme_minimal()
+  print(p)
+}
+```
+
+### Box Plots: Morale by Support Factors
+
+```{r boxplots, fig.height=5}
+box_vars <- c("Environment_F", "Relationship_F", "WorkLife_F", "OverTime", "BusinessTravel")
+
+for (var in box_vars) {
+  p <- ggplot(data, aes(x = .data[[var]], y = Morale_Index, fill = .data[[var]])) +
+    geom_boxplot(alpha = 0.75, outlier.alpha = 0.25) +
+    labs(title = paste("Morale Index by", var), x = var, y = "Morale Index") +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2") +
+    theme(legend.position = "none")
+  print(p)
+}
+```
+
+### Correlation Heatmap
+
+```{r correlation-heatmap, fig.width=10, fig.height=8}
+cor_vars <- c("Support_Index", "Morale_Index", "EnvironmentSatisfaction", "RelationshipSatisfaction",
+              "WorkLifeBalance", "OverTime_Num", "JobSatisfaction", "JobInvolvement",
+              "PerformanceRating", "Age", "MonthlyIncome", "YearsAtCompany")
+cor_matrix <- cor(data[, cor_vars], use = "complete.obs")
+
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45,
+         addCoef.col = "black", number.cex = 0.6)
+```
+
+### Scatter Plot: Support Index vs Morale Index
+
+```{r scatter-support-morale}
+ggplot(data, aes(x = Support_Index, y = Morale_Index)) +
+  geom_point(alpha = 0.2, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  labs(title = "Support Index vs Morale Index",
+       x = "Support Index", y = "Morale Index") +
+  theme_minimal()
+```
+
+## Probability Distribution Fitting
+
+### Normal Distribution (Morale Index)
+
+```{r fit-normal}
+fit_norm_morale <- fitdist(data$Morale_Index, "norm")
+ad_morale <- ad.test(data$Morale_Index)
+```
+
+Estimated μ = `r round(fit_norm_morale$estimate["mean"], 4)`, σ = `r round(fit_norm_morale$estimate["sd"], 4)`. Anderson-Darling p = `r format.pval(ad_morale$p.value)`.
+
+```{r plot-normal-morale}
+ggplot(data, aes(x = Morale_Index)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,
+                 fill = "steelblue", color = "white", alpha = 0.7) +
+  stat_function(fun = dnorm,
+                args = list(mean = fit_norm_morale$estimate["mean"],
+                            sd = fit_norm_morale$estimate["sd"]),
+                color = "red", linewidth = 1) +
+  labs(title = "Morale Index with Fitted Normal Distribution",
+       x = "Morale Index", y = "Density") +
+  theme_minimal()
+```
+
+### Gamma Distribution (Monthly Income)
+
+```{r fit-gamma}
+income_positive <- data$MonthlyIncome[data$MonthlyIncome > 0]
+fit_gamma <- tryCatch(
+  fitdist(income_positive, "gamma"),
+  error = function(e) fitdist(income_positive, "gamma", method = "mme")
+)
+gof_gamma <- tryCatch(gofstat(fit_gamma), error = function(e) NULL)
+```
+
+Estimated shape = `r round(fit_gamma$estimate["shape"], 4)`, rate = `r round(fit_gamma$estimate["rate"], 6)`.
+
+```{r plot-gamma}
+ggplot(data.frame(x = income_positive), aes(x = x)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,
+                 fill = "steelblue", color = "white", alpha = 0.7) +
+  stat_function(fun = dgamma,
+                args = list(shape = fit_gamma$estimate["shape"],
+                            rate = fit_gamma$estimate["rate"]),
+                color = "red", linewidth = 1) +
+  labs(title = "Monthly Income with Fitted Gamma Distribution",
+       x = "Monthly Income", y = "Density") +
+  theme_minimal()
+```
+
+### Poisson Distribution (Num Companies Worked)
+
+```{r fit-poisson}
+fit_pois <- fitdist(data$NumCompaniesWorked, "pois")
+```
+
+Estimated λ = `r round(fit_pois$estimate["lambda"], 4)`.
+
+```{r plot-poisson}
+obs_df <- as.data.frame(table(data$NumCompaniesWorked))
+colnames(obs_df) <- c("x", "Observed")
+obs_df$x <- as.numeric(as.character(obs_df$x))
+obs_df$Observed <- obs_df$Observed / nrow(data)
+obs_df$Expected <- dpois(obs_df$x, lambda = fit_pois$estimate["lambda"])
+
+ggplot(obs_df) +
+  geom_col(aes(x = x, y = Observed), fill = "steelblue", alpha = 0.7, width = 0.6) +
+  geom_line(aes(x = x, y = Expected), color = "red", linewidth = 1) +
+  geom_point(aes(x = x, y = Expected), color = "red", size = 2.2) +
+  labs(title = "NumCompaniesWorked: Observed vs Fitted Poisson",
+       x = "Count", y = "Probability") +
+  theme_minimal()
+```
+
+### Bernoulli Distribution (OverTime)
+
+```{r fit-bernoulli}
+p_hat <- mean(data$OverTime_Num)
+```
+
+Estimated p (OverTime = Yes) = `r round(p_hat, 4)`.
+
+```{r plot-bernoulli}
+bern_df <- data.frame(
+  Category = factor(c("No", "Yes"), levels = c("No", "Yes")),
+  Observed = c(mean(data$OverTime_Num == 0), p_hat),
+  Expected = c(1 - p_hat, p_hat)
+)
+bern_long <- pivot_longer(bern_df, cols = c(Observed, Expected),
+                          names_to = "Type", values_to = "Proportion")
+
+ggplot(bern_long, aes(x = Category, y = Proportion, fill = Type)) +
+  geom_col(position = "dodge", alpha = 0.8) +
+  labs(title = "OverTime: Observed vs Fitted Bernoulli",
+       x = "OverTime", y = "Proportion") +
+  scale_fill_manual(values = c("Observed" = "steelblue", "Expected" = "tomato")) +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+# Inferential Analytics
+
+We use α = 0.05. If p \< 0.05, reject H₀.
+
+## ANOVA: Environment Satisfaction
+
+-   H₀: Mean morale is equal across environment satisfaction levels.
+-   H₁: At least one level has a different mean morale.
+
+```{r anova-env}
+anova_env <- aov(Morale_Index ~ Environment_F, data = data)
+env_p <- summary(anova_env)[[1]][["Pr(>F)"]][1]
+env_f <- summary(anova_env)[[1]][["F value"]][1]
+summary(anova_env)
+```
+
+Result: F = `r round(env_f, 3)`, p = `r format.pval(env_p)`.
+
+```{r tukey-env}
+TukeyHSD(anova_env)
+```
+
+## ANOVA: Work-Life Balance
+
+```{r anova-wlb}
+anova_wlb <- aov(Morale_Index ~ WorkLife_F, data = data)
+wlb_p <- summary(anova_wlb)[[1]][["Pr(>F)"]][1]
+summary(anova_wlb)
+```
+
+p = `r format.pval(wlb_p)`.
+
+## ANOVA: Relationship Satisfaction
+
+```{r anova-rel}
+anova_rel <- aov(Morale_Index ~ Relationship_F, data = data)
+rel_p <- summary(anova_rel)[[1]][["Pr(>F)"]][1]
+summary(anova_rel)
+```
+
+p = `r format.pval(rel_p)`.
+
+## Two-Sample t-test: OverTime
+
+-   H₀: Mean morale is equal for OverTime = Yes and No.
+-   H₁: Mean morale differs by overtime status.
+
+```{r ttest-overtime}
+t_over <- t.test(Morale_Index ~ OverTime, data = data)
+t_over
+```
+
+p = `r format.pval(t_over$p.value)`.
+
+## Two-Proportion Test: High Morale in High vs Low Environment
+
+```{r proportion-test}
+high_env <- data[data$Environment_F == "Very High", ]
+low_env <- data[data$Environment_F == "Low", ]
+
+successes <- c(sum(high_env$High_Morale), sum(low_env$High_Morale))
+totals <- c(nrow(high_env), nrow(low_env))
+prop_res <- prop.test(successes, totals)
+prop_res
+```
+
+p = `r format.pval(prop_res$p.value)`.
+
+## Variance Tests
+
+### Levene's Test (Environment groups)
+
+```{r levene-test}
+lev_res <- leveneTest(Morale_Index ~ Environment_F, data = data)
+lev_res
+```
+
+### F-test (OverTime groups)
+
+```{r f-test}
+f_res <- var.test(Morale_Index ~ OverTime, data = data)
+f_res
+```
+
+## Pearson Correlation: Support Index vs Morale Index
+
+```{r corr-test}
+cor_res <- cor.test(data$Support_Index, data$Morale_Index, method = "pearson")
+cor_res
+```
+
+r = `r round(cor_res$estimate, 4)`, p = `r format.pval(cor_res$p.value)`.
+
+------------------------------------------------------------------------
+
+# Predictive Analytics
+
+## Multiple Linear Regression
+
+### Full Model
+
+```{r regression-full}
+model_data <- data[, c("Morale_Index", "Support_Index", "EnvironmentSatisfaction",
+                       "RelationshipSatisfaction", "WorkLifeBalance", "OverTime_Num",
+                       "BusinessTravel", "Age", "MonthlyIncome", "JobLevel",
+                       "YearsAtCompany", "Gender", "Department")]
+
+full_model <- lm(Morale_Index ~ ., data = model_data)
+summary(full_model)
+```
+
+### Backward Selection (AIC)
+
+```{r backward-selection, results='hide'}
+final_model <- step(full_model, direction = "backward", trace = 1)
+```
+
+### Final Model
+
+```{r final-model}
+summary(final_model)
+```
+
+```{r model-metrics}
+r_sq <- summary(final_model)$r.squared
+adj_r_sq <- summary(final_model)$adj.r.squared
+```
+
+-   R-squared: `r round(r_sq, 4)`
+-   Adjusted R-squared: `r round(adj_r_sq, 4)`
+
+### Regression Diagnostics
+
+```{r diagnostics, fig.width=10, fig.height=8}
+par(mfrow = c(2, 2))
+plot(final_model)
+```
+
+### Multicollinearity Check (VIF)
+
+```{r vif}
+if (length(coef(final_model)) > 1) {
+  vif_values <- car::vif(final_model)
+  if (is.matrix(vif_values)) {
+    vif_df <- data.frame(Variable = rownames(vif_values), vif_values, row.names = NULL, check.names = FALSE)
+    vif_df[,-1] <- lapply(vif_df[,-1], function(x) round(as.numeric(x), 3))
+  } else {
+    vif_df <- data.frame(Variable = names(vif_values), VIF = round(as.numeric(vif_values), 3))
+  }
+} else {
+  vif_df <- data.frame(Note = "Final model contains only an intercept. VIF is not applicable.")
+}
+knitr::kable(vif_df, row.names = FALSE, caption = "Variance Inflation Factors")
+```
+
+## Naive Bayes Classification
+
+### Train-Test Split
+
+```{r train-test-split}
+train_idx <- createDataPartition(data$Morale_Category, p = 0.7, list = FALSE)
+train_data <- data[train_idx, ]
+test_data <- data[-train_idx, ]
+```
+
+### Model Training
+
+```{r naive-bayes-train}
+nb_features <- c("Environment_F", "Relationship_F", "WorkLife_F", "OverTime",
+                 "BusinessTravel", "Support_Index")
+nb_formula <- as.formula(paste("Morale_Category ~", paste(nb_features, collapse = " + ")))
+
+nb_model <- naiveBayes(nb_formula, data = train_data)
+nb_model$apriori
+```
+
+### Evaluation
+
+```{r nb-evaluation}
+nb_pred <- predict(nb_model, newdata = test_data)
+cm <- confusionMatrix(nb_pred, test_data$Morale_Category)
+cm
+```
+
+-   Accuracy: `r round(cm$overall["Accuracy"] * 100, 2)`%
+-   Kappa: `r round(cm$overall["Kappa"], 4)`
+
+```{r nb-per-class}
+knitr::kable(round(cm$byClass[, c("Sensitivity", "Specificity", "Precision", "Recall", "F1")], 4),
+             caption = "Per-Class Performance Metrics")
+```
+
+## New Employee Prediction
+
+Use this block to input one employee profile and get model-based morale predictions.
+
+```{r new-employee-prediction}
+# Edit this row to score a new employee profile.
+new_employee <- data.frame(
+  Age = 35,
+  MonthlyIncome = 6500,
+  YearsAtCompany = 5,
+  JobLevel = 2,
+  OverTime = "No",
+  BusinessTravel = "Travel_Rarely",
+  EnvironmentSatisfaction = 3,
+  RelationshipSatisfaction = 3,
+  WorkLifeBalance = 3,
+  Gender = "Male",
+  Department = "Sales",
+  stringsAsFactors = FALSE
+)
+
+# Match factor levels with dataset.
+factor_cols <- names(data)[sapply(data, is.factor)]
+for (col in factor_cols) {
+  if (col %in% names(new_employee)) {
+    new_employee[[col]] <- factor(new_employee[[col]], levels = levels(data[[col]]))
+  }
+}
+
+# Derived features used by models.
+new_employee$OverTime_Num <- ifelse(new_employee$OverTime == "Yes", 1, 0)
+new_employee$Environment_F <- factor(new_employee$EnvironmentSatisfaction,
+                                     levels = 1:4, labels = sat_levels, ordered = TRUE)
+new_employee$Relationship_F <- factor(new_employee$RelationshipSatisfaction,
+                                      levels = 1:4, labels = sat_levels, ordered = TRUE)
+new_employee$WorkLife_F <- factor(new_employee$WorkLifeBalance,
+                                  levels = 1:4, labels = sat_levels, ordered = TRUE)
+
+z_from_data <- function(x, base) (x - mean(base)) / sd(base)
+travel_score <- ifelse(new_employee$BusinessTravel == "Non-Travel", 2,
+                       ifelse(new_employee$BusinessTravel == "Travel_Rarely", 1, 0))
+
+new_employee$Support_Index <- rowMeans(cbind(
+  z_from_data(new_employee$EnvironmentSatisfaction, data$EnvironmentSatisfaction),
+  z_from_data(new_employee$RelationshipSatisfaction, data$RelationshipSatisfaction),
+  z_from_data(new_employee$WorkLifeBalance, data$WorkLifeBalance),
+  z_from_data(1 - new_employee$OverTime_Num, 1 - data$OverTime_Num),
+  z_from_data(travel_score, ifelse(data$BusinessTravel == "Non-Travel", 2,
+                                   ifelse(data$BusinessTravel == "Travel_Rarely", 1, 0)))
+))
+
+# Predictions
+pred_morale_index <- as.numeric(predict(final_model, newdata = new_employee))
+pred_morale_binary <- ifelse(pred_morale_index > median(data$Morale_Index), "High", "Low")
+pred_morale_category <- as.character(predict(nb_model, newdata = new_employee))
+
+model_note <- ifelse(length(coef(final_model)) == 1,
+                     "Regression model is intercept-only; score has limited personalization.",
+                     "Regression model uses selected predictors from backward AIC.")
+
+pred_tbl <- data.frame(
+  Predicted_Morale_Index = pred_morale_index,
+  Predicted_Binary_Morale = pred_morale_binary,
+  Predicted_Morale_Category_NB = pred_morale_category,
+  Note = model_note
+)
+pred_tbl$Predicted_Morale_Index <- round(pred_tbl$Predicted_Morale_Index, 4)
+
+knitr::kable(pred_tbl, caption = "Prediction for New Employee Row")
+```
+
+------------------------------------------------------------------------
+
+# Conclusion
+
+## Summary of Findings
+
+```{r conclusion-setup, include=FALSE}
+test_pvals <- list(
+  "ANOVA: Environment Satisfaction" = env_p,
+  "ANOVA: Work-Life Balance" = wlb_p,
+  "ANOVA: Relationship Satisfaction" = rel_p,
+  "t-test: OverTime" = t_over$p.value,
+  "Proportion test: High vs Low Environment" = prop_res$p.value,
+  "Correlation: Support vs Morale" = cor_res$p.value
+)
+```
+
+```{r findings-list, echo=FALSE, results='asis'}
+for (nm in names(test_pvals)) {
+  sig <- ifelse(test_pvals[[nm]] < 0.05, "**Significant**", "Not significant")
+  cat(sprintf("- %s: p = %s (%s)\n", nm, format.pval(test_pvals[[nm]]), sig))
+}
+```
+
+## Answer to the Analytical Statement
+
+**Final Verdict: The statement is supported in this simulated-dataset experiment.**
+
+The statement **"Positive work environment improves employee morale"** is strongly supported by this simulated dataset and model set. Core inferential tests are statistically significant (Environment ANOVA: p = `r format.pval(env_p)`, Work-Life Balance ANOVA: p = `r format.pval(wlb_p)`, Relationship ANOVA: p = `r format.pval(rel_p)`, and High-vs-Low Environment proportion test: p = `r format.pval(prop_res$p.value)`).
+
+The OverTime t-test and Support-Morale correlation are also statistically significant, and the practical signal is strong overall (Pearson r = `r round(cor_res$estimate, 4)`, regression adjusted R² = `r round(adj_r_sq, 4)`, Naive Bayes accuracy = `r round(cm$overall["Accuracy"] * 100, 2)`%). Therefore, this analysis provides strong evidence that a positive work environment is associated with higher morale in this simulated scenario.
+
+## Predictive Summary
+
+-   Regression adjusted R²: `r round(adj_r_sq, 4)`
+-   Naive Bayes accuracy: `r round(cm$overall["Accuracy"] * 100, 2)`%
+-   Interpretation: Predictive performance is strong, so model-based support for the statement is high in this simulated experiment.
+
+## Limitations
+
+1.  This file uses simulated experimental data, so findings should be used for methodological comparison rather than real-world inference.
+2.  Composite indexes use equal weighting, which may not reflect true business importance of each component.
+3.  Large samples can make small effects statistically significant.
+4.  Naive Bayes assumes conditional independence of features.
+5.  Survey-style variables are proxies for complex psychological constructs.
