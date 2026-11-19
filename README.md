@@ -4,11 +4,6 @@
 
 **Build consistent routines, one habit at a time.**
 
-[![Platform](https://img.shields.io/badge/platform-mobile-lightgrey)](https://github.com/pramodstd/habit-tracker-app)
-[![Framework](https://img.shields.io/badge/framework-specify%20framework-informational)](https://github.com/pramodstd/habit-tracker-app)
-[![Build](https://img.shields.io/badge/build-status%20unknown-lightgrey)](https://github.com/pramodstd/habit-tracker-app)
-[![License](https://img.shields.io/badge/license-specify%20license-lightgrey)](https://github.com/pramodstd/habit-tracker-app)
-
 </div>
 
 ## Overview
